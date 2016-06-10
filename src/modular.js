@@ -497,48 +497,82 @@
 	});
 	oWindow.modular = modular;
 	function isValidExport(exports) {
-		var valid = typeof exports !== 'undefined';
+		var valid = typeof exports !== 'undefined' && (exports !== null);
 		valid = valid && ((exports instanceof Array) 
 			|| (['number', 'function', 'bool', 'object'].indexOf(typeof exports) >= 0));
 		return valid;
 	}
-	function registerModule(path, exports) {
+	function isEmpty(object) {
+		return Object.keys(object || {}).length === 0;
+	}
+	//register's scrip module from global variable module.exports like requirejs
+	function registerScript(path, defineExports) {
 		if (path && oWindow.module && oWindow.module.exports 
 			&& isValidExport(oWindow.module.exports)) {
-				modules[path] = oWindow.module.exports;
+				registerExport(path, oWindow.module.exports);							
 		}
 		delete oWindow.exports;
 		delete oWindow.module;
 		oWindow.module = {
-			exports : exports || {}
+			exports : (!path && defineExports) || {}
 		};
 		oWindow.exports = oWindow.module.exports;
 	}	
+	function registerExport(scriptPath, exportObj) {
+		exportObj = exportObj || {};		
+		modules[scriptPath] = exportObj;
+		/*if(typeof exportObj !== 'object' && isEmpty(modules[scriptPath])) {
+			modules[scriptPath] = exportObj;
+		} else {
+			exportObj = modules[scriptPath] = extend(modules[scriptPath] || {}, exportObj)
+		}*/
+		moduleName = exportObj.name;
+		if (!moduleName) {
+			//extract filename without extension
+			nameMatch = scriptPath.match(/\/([^\/]+)\.[a-z]+$/i);
+			moduleName = nameMatch[1] || undefined;
+		}
+		if (moduleName && !modules[moduleName]) {
+			modules[moduleName] = exportObj;
+		}
+	}
 	function modularjs(deps, callback, exports) {		
 		//clean up module.exports
-		registerModule(undefined, exports);
-
+		registerScript(undefined, exports);
 		currentScript = modular.defer();
+		//this will be resolve(d) by loadScript
 		currentScript.promise.then(function(currentPath) {
+			var modularScript, dirname, fname, fmatch = currentPath.match(FILE_NAME_EXP), allPromises = [];			
+			modularScript = currentScript;
 			currentScript = undefined;
-			var dirname, fname, fmatch = currentPath.match(FILE_NAME_EXP), allPromises = [];
 			fname = fmatch && fmatch[0] || '';
 			dirname = currentPath.substr(0, currentPath.length - fname.length);
-			registerModule(currentPath);
+			modularScript.filename = currentPath;
+			registerScript(currentPath);
 			(deps || []).forEach(function(dep) {
 				var path = dirname + dep;
+				//normalize path
+				path = path.replace(/[^\/]+\/\.\.\//g, "")
+							.replace(/\/\./g, "")
+							.toLowerCase();
 				if (modules[path]) {
 					allPromises.push(Promise.resolve(modules[path]));
+				} else if (modules[dep]) {
+					allPromises.push(Promise.resolve(modules[dep]));
 				} else if (null !== path.match(/\.js$/)) {
 					allPromises.push(loadScript(path)
 						.then(function (depPath) {
-							return modules[depPath];
+							return modules[depPath.toLowerCase()];
 						}));
 				}			
 			});
 			Promise.all(allPromises).then(function (injections) {
+				var scriptExports;
 				if (typeof callback === 'function') {
-					callback.apply(this, injections);					
+					scriptExports = callback.apply(modularScript, injections || []);
+					if (isValidExport(scriptExports)) {
+						registerExport(currentPath, scriptExports);
+					}					
 				}
 			});
 		});
@@ -547,7 +581,7 @@
 				currentScript.reject('modularjs should be called on top level');
 			}
 		});
-		return currentScript.promise;
+		return currentScript;
 	}
 	function extend(dest, source) {
 		var key;
@@ -560,27 +594,35 @@
 		}
 		return dest;
 	}
-	function defineModule(deps, callback) {
-		var scriptPath, exports;
+	/**
+	 *define(['inj'], function(inj){ return {}; });
+	 *define({}); define([]);
+	 *define(function () { return {}; });
+	 */
+	function defineScript(deps, callback) {
+		var scriptPath, exports, modularScript;
 		if ((deps instanceof Array) && (typeof callback === 'function')) {
-			modularjs(deps, function () {
-				exports = callback.apply(this, arguments);
-				if (scriptPath && modules[scriptPath]) {
-					if(typeof exports !== 'object') {
-						modules[scriptPath] = exports;
-					} else {
-						modules[scriptPath] = extend(modules[scriptPath] || {}, exports)
-					}
+			modularScript = modularjs(deps, function () {
+				var moduleName, nameMatch;
+				exports = callback.apply(modularScript, arguments);
+				if (scriptPath) {
+					registerExport(scriptPath, exports);
 				}				
-			}).then(function (currentPath) {
-				scriptPath = currentPath;
 			});
-		} else if (typeof deps !== 'undefined') {			
-			modularjs(undefined, undefined, deps);
+			modularScript.promise.then(function (currentPath) {
+				scriptPath = currentPath;				
+			});
+		} else if (['undefined', 'function'].indexOf(typeof deps) < 0) {
+			exports = deps;			
+			modularScript = modularjs(undefined, undefined, exports);
+		} else if (typeof deps === 'function') {
+			callback = deps;
+			modularScript = modularjs([], callback);			
 		}
+		return modularScript;
 	}
 	oWindow.modularjs = modularjs;
-	oWindow.define = defineModule;
+	oWindow.define = defineScript;
 	return modular;
 
 	//*** HELPER FUNCTIONS ***//	
